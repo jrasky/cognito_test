@@ -1,0 +1,20 @@
+{
+  "name": "cognito_test",
+  "version": "1.0.0",
+  "description": "a test for cognito auth for cloudfront",
+  "private": true,
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Jerome Rasky",
+  "license": "MPL-2.0",
+  "dependencies": {
+    "axios": "^0.22.0",
+    "cookie": "^0.4.1",
+    "jose": "^3.19.0"
+  },
+  "devDependencies": {
+    "webpack": "^5.57.1",
+    "webpack-cli": "^4.8.0"
+  }
+}
