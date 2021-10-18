@@ -1,31 +1,170 @@
-const https = require('https');
-const url = require('url');
-const cookie = require('cookie');
-const AWS = require('aws-sdk');
-const { jwtVerify } = require('jose/jwt/verify');
-const Axios = require('axios');
+import fetch from 'node-fetch';
+import cookie from 'cookie';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 
-const identityPool = 'us-west-2:ac160263-14e7-4ccf-a216-5f470e7f85f4';
-const authRedirect = 'https://rasky-test.auth.us-west-2.amazoncognito.com/login?client_id=2i3g72u0761lq3vuhj1b6jnb15&response_type=code&scope=email+openid+phone+profile&redirect_uri=https://tools.rasky.co/';
-const tokenURL = 'https://2i3g72u0761lq3vuhj1b6jnb15:<secret>@rasky-test.auth.us-west-2.amazoncognito.com/oauth2/token';
-const tokenRedirect = 'https://tools.raksy.co/';
-const tokenClientId = '2i3g72u0761lq3vuhj1b6jnb15';
+const userPool = 'us-west-2_KQGW3b4LR';
+const identityDomain = 'rasky-test.auth.us-west-2.amazoncognito.com';
+const clientId = '2i3g72u0761lq3vuhj1b6jnb15';
+const clientSecret = '<secret>';
+const tokenRedirect = 'https://tools.rasky.co/';
 
-exports.handler = async function(event, context) {
+const tokenURL = `https://${identityDomain}/oauth2/token`;
+const tokenRequestHeaders = {
+    'Authorization': `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`
+};
+const cognitoIssuer = `https://cognito-idp.us-west-2.amazonaws.com/${userPool}`
+const refreshTokenMaxAge = 30 * 24 * 60 * 60; // 30 days in seconds
+
+const JWKS = createRemoteJWKSet(new URL(`${cognitoIssuer}/.well-known/jwks.json`));
+
+export async function handler(event, context) {
     const request = event.Records[0].cf.request;
-    const queryData = url.parse(request.uri + request.queryString, true).query;
-    const cookies = cookie.parse(request.headers.cookie || '')
+    const searchParams = new URLSearchParams(request.querystring);
+    const cookies = Object.assign({}, ...(request.headers.cookie || [])
+        .map(entry => cookie.parse(entry.value)));
 
-    // Four possibilities:
+    // Five possibilities:
     // 1) creds still valid
     // 2) refresh token still valid, creds expired
     // 3) auth code present, new refresh token needs to be fetched
     // 4) no creds/token/auth code present
-    
-    AWS.config.credentials = AWS.CognitoIdentityCredentials({
-        IdentityPoolId: identityPool,
-        Logins: {
-            
+    // 5) invalid or expired token/code
+
+    // Check for existing, valid credentials first, in case both creds and a
+    // login code are provided.
+
+    // TODO: Have an error page for unauthorized users.
+
+    if (cookies.id_token) {
+        try {
+            // Check existing credentials
+            await checkToken(cookies.id_token);
+
+            // case 1: creds still valid
+            return request;
+        } catch (e) {
+            console.log('Credentials failed validation: ', e);
+            // continue and attempt to refresh credentials
         }
-    })
+    }
+
+    if (cookies.refresh_token) {
+        try {
+            // case 2: refresh token still valid
+            return {
+                status: '307',
+                statusDescription: 'Temporary Redirect',
+                headers: {
+                    'location': [{ value: request.uri }],
+                    'set-cookie': await refreshCredentials(cookies.refresh_token)
+                }
+            }
+        } catch (e) {
+            console.log('Failed to refresh credentials: ', e);
+        }
+    }
+
+    if (searchParams.get('code')) {
+        try {
+            // case 3: auth code present, new refresh token needs to be fetched
+            return {
+                status: '307',
+                statusDescription: 'Temporary Redirect',
+                headers: {
+                    'location': [{ value: request.uri }],
+                    'set-cookie': await getNewCredentials(searchParams.get('code'))
+                }
+            };
+        } catch (e) {
+            console.log('Failed to process new login: ', e);
+        }
+    }
+
+    // case 4: No credentials or
+    // case 5: invalid or expired credentials
+    return {
+        status: '303',
+        statusDescription: 'See Other',
+        headers: {
+            location: [{ value: new URL('?' + new URLSearchParams({
+                response_type: 'code',
+                client_id: clientId,
+                redirect_uri: tokenRedirect
+            }), `https://${identityDomain}/login`).toString() }]
+        }
+    };
+}
+
+async function checkToken(id_token) {
+    // jwtVerify checks the JWT signature, issuer, audience, and expiration
+    const { payload } = await jwtVerify(id_token, JWKS, {
+        issuer: cognitoIssuer,
+        audience: clientId
+    });
+
+    if (payload.token_use !== 'id') {
+        throw new Error(`Invalid token use: ${payload.token_use}`);
+    }
+}
+
+async function getNewCredentials(code) {
+    const response = await fetch(tokenURL, {
+        method: 'POST',
+        headers: tokenRequestHeaders,
+        body: new URLSearchParams({
+            grant_type: 'authorization_code',
+            redirect_uri: tokenRedirect,
+            client_id: clientId,
+            code
+        })
+    });
+
+    if (!response.ok) {
+        const { error } = await response.json();
+        throw new Error(`Error fetching new credentials: ${response.status} ${response.statusText} ${error}`);
+    }
+
+    const { id_token, access_token, refresh_token } = await response.json();
+
+    // Make ID and access session tokens, rely on refresh token for new
+    // sessions.
+    const idTokenCookie = cookie.serialize('id_token', id_token, { secure: true });
+    const accessTokenCookie = cookie.serialize('access_token', access_token, { secure: true });
+    const refreshTokenCookie = cookie.serialize('refresh_token', refresh_token, {
+        secure: true,
+        maxAge: refreshTokenMaxAge
+    });
+
+    return [
+        { value: idTokenCookie },
+        { value: accessTokenCookie },
+        { value: refreshTokenCookie }
+    ];
+}
+
+async function refreshCredentials(refresh_token) {
+    const response = await fetch(tokenURL, {
+        method: 'POST',
+        headers: tokenRequestHeaders,
+        body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            client_id: clientId,
+            refresh_token
+        })
+    });
+
+    if (!response.ok) {
+        const { error } = await response.json();
+        throw new Error(`Error refreshing credentials: ${response.status} ${response.statusText} ${error}`);
+    }
+
+    const { id_token, access_token } = await response.json();
+
+    const idTokenCookie = cookie.serialize('id_token', id_token, { secure: true });
+    const accessTokenCookie = cookie.serialize('access_token', access_token, { secure: true });
+
+    return [
+        { value: idTokenCookie },
+        { value: accessTokenCookie }
+    ];
 }

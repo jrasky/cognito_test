@@ -9,9 +9,9 @@
   "author": "Jerome Rasky",
   "license": "MPL-2.0",
   "dependencies": {
-    "axios": "^0.22.0",
     "cookie": "^0.4.1",
-    "jose": "^3.19.0"
+    "jose": "^4.0.4",
+    "node-fetch": "^3.0.0"
   },
   "devDependencies": {
     "webpack": "^5.57.1",
