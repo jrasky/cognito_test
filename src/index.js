@@ -6,7 +6,7 @@ const userPool = 'us-west-2_KQGW3b4LR';
 const identityDomain = 'rasky-test.auth.us-west-2.amazoncognito.com';
 const clientId = '2i3g72u0761lq3vuhj1b6jnb15';
 const clientSecret = '<secret>';
-const tokenRedirect = 'https://tools.rasky.co/';
+const tokenRedirect = 'https://tools.rasky.co/login';
 
 const tokenURL = `https://${identityDomain}/oauth2/token`;
 const tokenRequestHeaders = {
@@ -23,17 +23,39 @@ export async function handler(event, context) {
     const cookies = Object.assign({}, ...(request.headers.cookie || [])
         .map(entry => cookie.parse(entry.value)));
 
-    // Five possibilities:
+    // Six possibilities:
     // 1) creds still valid
     // 2) refresh token still valid, creds expired
     // 3) auth code present, new refresh token needs to be fetched
     // 4) no creds/token/auth code present
     // 5) invalid or expired token/code
+    // 6) login failed and we have an error code to show the user
 
     // Check for existing, valid credentials first, in case both creds and a
     // login code are provided.
 
     // TODO: Have an error page for unauthorized users.
+
+    if (request.uri === '/login' && searchParams.get('code')) {
+        try {
+            // case 3: auth code present, new refresh token needs to be fetched
+            return {
+                status: '307',
+                statusDescription: 'Temporary Redirect',
+                headers: {
+                    'location': [{ value: '/' }],
+                    'set-cookie': await getNewCredentials(searchParams.get('code'))
+                }
+            };
+        } catch (e) {
+            console.log('Failed to process new login: ', e);
+
+            return request;
+        }
+    } else if (request.uri === '/login') {
+        // 6: show the user the unauthed view
+        return request;
+    }
 
     if (cookies.id_token) {
         try {
@@ -61,22 +83,6 @@ export async function handler(event, context) {
             }
         } catch (e) {
             console.log('Failed to refresh credentials: ', e);
-        }
-    }
-
-    if (searchParams.get('code')) {
-        try {
-            // case 3: auth code present, new refresh token needs to be fetched
-            return {
-                status: '307',
-                statusDescription: 'Temporary Redirect',
-                headers: {
-                    'location': [{ value: request.uri }],
-                    'set-cookie': await getNewCredentials(searchParams.get('code'))
-                }
-            };
-        } catch (e) {
-            console.log('Failed to process new login: ', e);
         }
     }
 
